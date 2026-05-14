@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>AI 스트레칭 코치 - 통합 관리 시스템</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils"></script>
+    <style>
+        :root { --primary: #2ecc71; --bg: #0f172a; --card: #1e293b; --danger: #e74c3c; --accent: #f1c40f; --timer: #3498db; }
+        body { font-family: 'Pretendard', sans-serif; background: var(--bg); color: white; margin: 0; display: flex; height: 100vh; overflow: hidden; }
+        
+        .sidebar { width: 320px; background: var(--card); padding: 20px; border-right: 1px solid #334155; display: flex; flex-direction: column; overflow-y: auto; }
+        .ex-card { background: #242f42; padding: 15px; border-radius: 12px; margin-bottom: 10px; cursor: pointer; border-left: 4px solid transparent; transition: 0.2s; }
+        .ex-card.active { border-left-color: var(--primary); background: #1e293b; box-shadow: 0 4px 15px rgba(0,0,0,0.3); }
+        .ex-card .name { font-weight: bold; display: block; font-size: 0.95rem; margin-bottom: 5px; }
+        .equipment-tag { font-size: 0.75rem; color: var(--accent); background: rgba(241, 196, 15, 0.1); padding: 2px 6px; border-radius: 4px; margin-top: 5px; display: inline-block; }
+
+        .main { flex: 1; position: relative; background: #000; overflow: hidden; }
+        #output_canvas { width: 100%; height: 100%; object-fit: contain; transform: rotateY(180deg); }
+
+        .hud { position: absolute; top: 30px; left: 30px; background: rgba(15, 23, 42, 0.92); padding: 25px; border-radius: 20px; border-left: 8px solid var(--primary); width: 360px; pointer-events: none; z-index: 10; }
+        .status-msg { margin-top: 15px; font-size: 1.35rem; font-weight: bold; min-height: 1.6em; text-shadow: 0 2px 10px rgba(0,0,0,0.5); }
+        
+        .counter-box { position: absolute; top: 30px; right: 30px; background: var(--accent); color: #000; padding: 20px 35px; border-radius: 25px; text-align: center; font-weight: 900; z-index: 10; }
+        .timer-box { margin-top: 12px; padding: 12px; background: rgba(52, 152, 219, 0.2); border-radius: 12px; text-align: center; border: 1px solid var(--timer); }
+        
+        .side-selector { display: flex; gap: 10px; margin-bottom: 15px; }
+        .side-btn { flex: 1; padding: 10px; border-radius: 8px; border: 1px solid var(--primary); background: transparent; color: white; cursor: pointer; font-weight: bold; }
+        .side-btn.active { background: var(--primary); color: #0f172a; }
+    </style>
+</head>
+<body>
+
+<div class="sidebar">
+    <h2 style="color:var(--primary); margin:0 0 10px 0;">스트레칭 연습</h2>
+    <div id="side-ui" class="side-selector">
+        <button class="side-btn active" id="btn-left" onclick="setSide('left')">왼쪽</button>
+        <button class="side-btn" id="btn-right" onclick="setSide('right')">오른쪽</button>
+    </div>
+    <div id="exercise-list"></div>
+</div>
+
+<div class="main">
+    <video id="input_video" style="display:none"></video>
+    <canvas id="output_canvas"></canvas>
+
+    <div class="hud">
+        <div id="hud-name" style="font-size: 1.1rem; font-weight: bold;">운동 선택</div>
+        <div id="status-text" class="status-msg">준비 중...</div>
+        <div class="timer-box" id="timer-ui" style="display:none;">
+            <div id="time-left" style="font-size: 2.5rem; font-weight: 900; color: var(--timer);">0</div>
+        </div>
+        <div id="hud-guide" style="font-size: 0.85rem; color: #cbd5e1; margin-top: 10px; line-height: 1.5;"></div>
+    </div>
+
+    <div class="counter-box">
+        <b id="cur-count" style="font-size:3.5rem; display:block; line-height:1;">0</b>
+        <span id="cur-set" style="font-size:1rem;">SET 1</span>
+    </div>
+</div>
+
+<script>
+    const db = [
+        { 
+            name:'어깨/목 운동', equipment: '고무 밴드 사용', isSingle: false, left:[11,13,15,23], right:[12,14,16,24], 
+            readyAng: 25, peakAng: 90, type:'shoulder', goal:10, sets:3, 
+            guide:"⚠️ 배를 앞으로 쭉 내밀면 안 됩니다.", 
+            failMsg: "팔꿈치를 옆구리에 고정해볼까요?" 
+        },
+        { 
+            name:'손목 신전근 스트레칭', isSingle: true, left:[11,13,15,19], right:[12,14,16,20],
+            target: 120, type:'wrist', hold:10, goal:5, sets:2,
+            guide:"팔을 쭉 펴고 손바닥이 하늘을 보게 한 후 당기기", failMsg: "팔꿈치를 조금 더 펴주세요."
+        },
+        { 
+            name:'손목 굴곡근 스트레칭', isSingle: true, left:[11,13,15,19], right:[12,14,16,20], 
+            target: 120, type:'wrist', hold:10, goal:5, sets:2, 
+            guide:"팔을 쭉 펴고 손바닥을 바닥을 향하게 한 후 당기기", failMsg: "팔꿈치를 펴고 유지해볼까요?" 
+        },
+        { 
+            name:'허리 운동', isSingle: true, left:[11,23,25,27,29], right:[12,24,26,28,30], 
+            type:'waist', goal:10, sets:5, 
+            guide:"⚠️ 허리가 바닥에서 뜨지 않도록 밀착!", failMsg: "허리를 바닥에 밀착해주세요."
+        }
+    ];
+
+    let current = null, selectedSide = 'left', count = 0, set = 1;
+    let exerciseState = "IDLE"; 
+    let holdStartTime = null, lastVoiceTime = 0, smoothedLM = null;
+    const lerpAlpha = 0.15; 
+
+    const list = document.getElementById('exercise-list');
+    db.forEach(ex => {
+        const div = document.createElement('div');
+        div.className = 'ex-card';
+        div.innerHTML = `
+            <span class="name">${ex.name}</span>
+            ${ex.equipment ? `<span class="equipment-tag">${ex.equipment}</span>` : ''}
+            <small style="color:#94a3b8; display:block; margin-top:5px;">${ex.sets}세트</small>
+        `;
+        div.onclick = () => {
+            document.querySelectorAll('.ex-card').forEach(c => c.classList.remove('active'));
+            div.classList.add('active');
+            current = ex; count = 0; set = 1; exerciseState = "IDLE"; holdStartTime = null;
+            document.getElementById('hud-name').innerText = ex.name + (ex.equipment ? ` (${ex.equipment})` : '');
+            document.getElementById('hud-guide').innerText = ex.guide;
+            document.getElementById('timer-ui').style.display = (ex.hold || ex.type==='wrist') ? 'block' : 'none';
+            speak(`${ex.name} 시작합니다. ${ex.equipment ? ex.equipment + '를 준비하세요.' : ''}`, true);
+        };
+        list.appendChild(div);
+    });
+
+    function setSide(side) { 
+        selectedSide = side; 
+        document.querySelectorAll('.side-btn').forEach(b => b.classList.toggle('active', b.id === `btn-${side}`));
+        count = 0; set = 1; exerciseState = "IDLE"; holdStartTime = null; 
+    }
+    
+    function speak(t, priority = false) {
+        const now = Date.now();
+        if (!priority && now - lastVoiceTime < 3200) return;
+        const msg = new SpeechSynthesisUtterance(t);
+        msg.lang = 'ko-KR';
+        msg.rate = 1.1; 
+        window.speechSynthesis.speak(msg);
+        lastVoiceTime = now;
+    }
+
+    function getAngle(p1, p2, p3) {
+        const rad = Math.atan2(p3.y-p2.y, p3.x-p2.x) - Math.atan2(p1.y-p2.y, p1.x-p2.x);
+        let ang = Math.abs(rad * 180 / Math.PI);
+        return Math.round(ang > 180 ? 360 - ang : ang);
+    }
+
+    function onResults(results) {
+        canvasCtx.save();
+        canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+        canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+        if (results.poseLandmarks && current) {
+            let lm = results.poseLandmarks;
+            if (!smoothedLM) smoothedLM = lm;
+            else smoothedLM = smoothedLM.map((p, i) => ({ x: p.x * (1 - lerpAlpha) + lm[i].x * lerpAlpha, y: p.y * (1 - lerpAlpha) + lm[i].y * lerpAlpha, visibility: lm[i].visibility }));
+            lm = smoothedLM;
+
+            const sides = current.isSingle ? [selectedSide] : ['left', 'right'];
+            const statusText = document.getElementById('status-text');
+            const timeVal = document.getElementById('time-left');
+
+            sides.forEach(s => {
+                const ptsIdx = current[s];
+                let ok = false;
+
+                if (current.type === 'shoulder') {
+                    const ang = getAngle(lm[ptsIdx[0]], lm[ptsIdx[1]], lm[ptsIdx[2]]);
+                    const elbowRibsDist = Math.abs(lm[ptsIdx[1]].x - lm[ptsIdx[3]].x);
+                    const isElbowFixed = elbowRibsDist < 0.12; 
+                    const isReady = ang <= current.readyAng + 15; 
+                    const isStretch = ang >= current.peakAng - 10; 
+
+                    if (!isElbowFixed) {
+                        statusText.innerText = "팔꿈치를 옆구리에 붙여주세요!";
+                        statusText.style.color = "#ff4757";
+                        speak("팔꿈치 붙이세요", false); 
+                        holdStartTime = null; 
+                    } else if (exerciseState === "IDLE") {
+                        if (isReady) {
+                            ok = true;
+                            if (!holdStartTime) holdStartTime = Date.now();
+                            let elapsed = (Date.now() - holdStartTime) / 1000;
+                            statusText.innerText = `준비 자세 1초 유지... (${(1 - elapsed).toFixed(1)}s)`;
+                            statusText.style.color = "#2ecc71";
+                            if (elapsed >= 1) { exerciseState = "PEAK_WAIT"; holdStartTime = null; speak("팔을 바깥으로 벌리세요!", true); }
+                        } else {
+                            statusText.innerText = "팔꿈치를 붙이고 정면을 보세요."; statusText.style.color = "#f1c40f";
+                        }
+                    } else if (exerciseState === "PEAK_WAIT") {
+                        if (isStretch) {
+                            ok = true;
+                            if (!holdStartTime) holdStartTime = Date.now();
+                            let elapsed = (Date.now() - holdStartTime) / 1000;
+                            statusText.innerText = `벌리기 1초 유지... (${(1 - elapsed).toFixed(1)}s)`;
+                            statusText.style.color = "#2ecc71";
+                            if (elapsed >= 1) { exerciseState = "RETURN_WAIT"; holdStartTime = null; speak("좋아요. 이제 돌아오세요.", true); }
+                        } else {
+                            statusText.innerText = "팔을 바깥으로 벌려주세요."; statusText.style.color = "#f1c40f";
+                            speak("더 벌리세요", false);
+                        }
+                    } else if (exerciseState === "RETURN_WAIT") {
+                        if (isReady) { exerciseState = "IDLE"; count++; updateCounter(); statusText.innerText = "성공! 다음 횟수 준비."; }
+                        else { statusText.innerText = "완전히 준비 자세로 돌아와주세요."; statusText.style.color = "#f1c40f"; }
+                    }
+                    ok = isElbowFixed && (isReady || isStretch);
+                }
+
+                else if (current.type === 'waist') {
+                    const heelY = lm[ptsIdx[4]].y; const hipY = lm[ptsIdx[1]].y; 
+                    const isFootOnFloor = Math.abs(heelY - hipY) < 0.12;
+                    const isHook = getAngle(lm[ptsIdx[1]], lm[ptsIdx[2]], lm[ptsIdx[3]]) < 125 && isFootOnFloor;
+                    const isLifted = lm[ptsIdx[4]].y < lm[ptsIdx[1]].y - 0.12; 
+
+                    if (exerciseState === "IDLE") {
+                        if (isHook) { 
+                            ok = true; 
+                            statusText.innerText = "준비 완료! 발을 올려보세요."; 
+                            statusText.style.color = "#2ecc71"; 
+                            exerciseState = "READY_LIFT"; speak("다리를 올리세요.", true);
+                        } else { 
+                            statusText.innerText = "허리와 발을 바닥에 밀착해주세요."; 
+                            statusText.style.color = "#ff4757"; 
+                            speak("바닥에 붙이세요", false);
+                        }
+                    } else if (exerciseState === "READY_LIFT") {
+                        statusText.innerText = "준비 완료! 발을 올려보세요.";
+                        statusText.style.color = "#2ecc71";
+                        if (isLifted) { ok = true; count++; updateCounter(); exerciseState = "RETURN_WAIT"; speak("좋아요.", true); }
+                    } else if (exerciseState === "RETURN_WAIT") {
+                        if (isHook) { exerciseState = "IDLE"; }
+                        else { statusText.innerText = "다리를 다시 바닥으로 내려주세요."; statusText.style.color = "#f1c40f"; }
+                    }
+                }
+
+                else if (current.type === 'wrist') {
+                    const wrAng = getAngle(lm[ptsIdx[1]], lm[ptsIdx[2]], lm[ptsIdx[3]]);
+                    const elbowAng = getAngle(lm[ptsIdx[0]], lm[ptsIdx[1]], lm[ptsIdx[2]]);
+                    const isWristOk = wrAng < 135;
+                    const isElbowOk = elbowAng > 150; 
+
+                    if (isWristOk && isElbowOk) {
+                        ok = true;
+                        if (!holdStartTime) {
+                            holdStartTime = Date.now();
+                            speak("잘하고 있어요!", true); 
+                        }
+                        let remain = Math.max(0, Math.ceil(current.hold - (Date.now() - holdStartTime) / 1000));
+                        statusText.innerText = "잘하고 있습니다! 그대로 유지.";
+                        statusText.style.color = "#2ecc71";
+                        timeVal.innerText = remain;
+                        if (remain <= 0) { count++; holdStartTime = null; updateCounter(); }
+                    } else {
+                        statusText.style.color = "#ff7675";
+                        if (!isElbowOk) {
+                            statusText.innerText = "팔꿈치를 더 쭉 펴주세요!"; 
+                            speak("팔꿈치 펴세요", false); 
+                        } else if (!isWristOk) {
+                            statusText.innerText = "손목을 몸쪽으로 더 당겨주세요.";
+                            speak("손목 더 당기세요", false);
+                        }
+                        holdStartTime = null;
+                    }
+                }
+
+                ptsIdx.slice(0, 4).forEach(i => {
+                    canvasCtx.beginPath(); canvasCtx.arc(lm[i].x * canvasElement.width, lm[i].y * canvasElement.height, 8, 0, 2*Math.PI);
+                    canvasCtx.fillStyle = ok ? '#2ecc71' : '#ff4757'; canvasCtx.fill(); canvasCtx.stroke();
+                });
+            });
+        }
+        canvasCtx.restore();
+    }
+
+    function updateCounter() {
+        document.getElementById('cur-count').innerText = count;
+        if (count >= current.goal) {
+            if (set >= current.sets) { speak("참 잘하셨습니다! 오늘 루틴 완료.", true); count = 0; set = 1; }
+            else { speak(`${set}세트 완료. 잠시 휴식 후 다시 시작하세요.`, true); count = 0; set++; document.getElementById('cur-set').innerText = `SET ${set}`; }
+        } else { speak(count.toString(), true); }
+    }
+
+    const videoElement = document.getElementById('input_video');
+    const canvasElement = document.getElementById('output_canvas');
+    const canvasCtx = canvasElement.getContext('2d');
+    const pose = new Pose({locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${f}`});
+    pose.setOptions({ modelComplexity: 2, minDetectionConfidence: 0.8, minTrackingConfidence: 0.8 });
+    pose.onResults(onResults);
+    new Camera(videoElement, { onFrame: async () => await pose.send({image: videoElement}), width: 1280, height: 720 }).start();
+</script>
+</body>
+</html>
